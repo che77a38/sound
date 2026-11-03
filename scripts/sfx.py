@@ -83,19 +83,45 @@ def clean_field(s, limit=None):
 
 
 def show(rows, a, lic=False, hint=""):
-    """Print rows as tab-separated columns.
+    """Print results, as tab-separated columns or as JSON.
 
-    The license column is always emitted. Hiding it under `--license cc0` meant the
-    one case where you most need to prove a file is freely usable was also the one
-    case where the agent could not check it.
+    The license column is hidden by default: the search already filtered on it, and
+    the useful default view is the title, length and popularity signal. Pass
+    `--licenses` when the licence has to be shown, and `--json` for machine-readable
+    output, which always carries the licence.
     """
     save_index(rows)
+    if getattr(a, "json", False):
+        print(json.dumps([json_row(r) for r in rows], ensure_ascii=False, indent=2))
+        return
+    want_lic = lic or getattr(a, "licenses", False)
     for r in rows:
-        print("\t".join([r["key"], clean_field(r["title"]), r["dur"]] + ([r["stats"]] if "stats" in r else [])
-                        + [clean_field(r.get("license", "?"))] + ([clean_field(r["desc"])] if r.get("desc") else [])
-                        + [r["preview"]] * a.urls))
+        cols = [r["key"], clean_field(r["title"]), r["dur"]]
+        if "stats" in r:
+            cols.append(r["stats"])
+        if want_lic:
+            cols.append(clean_field(r.get("license", "?")))
+        if r.get("desc"):
+            cols.append(clean_field(r["desc"]))
+        if getattr(a, "urls", False):
+            cols.append(r["preview"])
+        print("\t".join(cols))
     if not rows:
         print("(none)" + hint)
+
+
+def json_row(r):
+    """One result as a plain dict, with the preview URL always included."""
+    out = {"key": r["key"], "title": clean_field(r["title"]), "duration": r["dur"],
+           "license": r.get("license", "?"), "author": r.get("author", "?"),
+           "description": clean_field(r.get("desc", "")), "url": r.get("preview", "")}
+    if r.get("provider"):
+        out["provider"] = r["provider"]
+    if "stats" in r:
+        out["stats"] = r["stats"]
+    if "downloads" in r:
+        out["downloads"] = r["downloads"]
+    return out
 
 
 def freesound(a):
@@ -364,19 +390,26 @@ def analyze(a):
     import shutil, subprocess
     if not shutil.which("ffprobe"):
         sys.exit("ffprobe not found — install ffmpeg (brew install ffmpeg)")
+    results = []
     for path in a.files:
         p = Path(path)
         if not p.exists():
-            print(f"FAIL {path}: no such file")
+            if a.json:
+                results.append({"file": str(path), "error": "no such file"})
+            else:
+                print(f"FAIL {path}: no such file")
             continue
         try:
             dur = subprocess.run(
                 ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", str(p)],
                 capture_output=True, text=True, timeout=60).stdout.strip()
         except Exception as e:
-            print(f"FAIL {path}: {e}")
+            if a.json:
+                results.append({"file": str(path), "error": repr(e)})
+            else:
+                print(f"FAIL {path}: {e}")
             continue
-        print(f"{p.name}\t{dur}s")
+        rec = {"file": str(path), "duration_seconds": float(dur) if dur else None}
         if a.loudness:
             try:
                 r = subprocess.run(
@@ -384,7 +417,13 @@ def analyze(a):
                     capture_output=True, text=True, timeout=180).stderr
                 for line in r.splitlines():
                     if "mean_volume" in line or "max_volume" in line:
-                        print("  " + line.strip().split("] ")[-1])
+                        val = line.strip().split("] ")[-1]
+                        if "mean_volume" in val:
+                            rec["mean_volume_db"] = float(val.split(":")[1].strip().split()[0])
+                        elif "max_volume" in val:
+                            rec["max_volume_db"] = float(val.split(":")[1].strip().split()[0])
+                        if not a.json:
+                            print("  " + val)
             except Exception:
                 pass
         if a.silence:
@@ -394,12 +433,22 @@ def analyze(a):
                      "-af", "silencedetect=noise=-45dB:d=0.15", "-f", "null", "/dev/null"],
                     capture_output=True, text=True, timeout=180).stderr
                 sil = [l.strip() for l in r.splitlines() if "silence_" in l]
+                regions = []
                 for line in sil[:12]:
-                    print("  " + line.split("] ")[-1])
-                if not sil:
+                    parts = line.split("] ")[-1]
+                    regions.append(parts)
+                    if not a.json:
+                        print("  " + parts)
+                if not sil and not a.json:
                     print("  (no silence detected above -45dB)")
+                rec["silence_regions"] = regions
             except Exception:
                 pass
+        if not a.json:
+            print(f"{p.name}\t{dur}s")
+        results.append(rec)
+    if a.json:
+        print(json.dumps(results, ensure_ascii=False, indent=2))
 
 
 def main():
@@ -426,10 +475,16 @@ def main():
     mu.add_argument("-n", type=int, default=10); mu.add_argument("--urls", action="store_true")
     mu.add_argument("--duration", choices=["short", "long"], default="long"); mu.set_defaults(fn=music)
 
+    # Output flags shared by every search command.
+    for sub in (f, o, m, al, mu):
+        sub.add_argument("--json", action="store_true", help="machine-readable JSON output")
+        sub.add_argument("--licenses", action="store_true", help="include the license column")
+
     g = sp.add_parser("get"); g.add_argument("out_dir"); g.add_argument("keys", nargs="+"); g.set_defaults(fn=get)
 
     an = sp.add_parser("analyze"); an.add_argument("files", nargs="+"); an.add_argument("--loudness", action="store_true")
-    an.add_argument("--silence", action="store_true"); an.set_defaults(fn=analyze)
+    an.add_argument("--silence", action="store_true"); an.add_argument("--json", action="store_true")
+    an.set_defaults(fn=analyze)
 
     a = ap.parse_args()
     try:

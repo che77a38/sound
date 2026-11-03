@@ -14,7 +14,7 @@ agent does not have to hand-assemble long ffmpeg expressions.
 
 All subcommands need ffmpeg on PATH (brew install ffmpeg).
 """
-import argparse, shutil, subprocess, sys
+import argparse, json, shutil, subprocess, sys
 from pathlib import Path
 
 
@@ -31,14 +31,9 @@ def run(cmd):
     return r.stderr
 
 
-def build_clean(a, src=None):
-    """A dialogue cleanup chain, ordered the way a mixer would.
-
-    Filter order matters: denoise before EQ (so the EQ is not amplifying noise),
-    de-esser after compression (sibilance is created by compression).
-    """
+def chain_without_loudnorm(a, src):
+    """The cleanup chain up to (but not including) loudness normalisation."""
     f = []
-    # Denoise first: everything downstream would otherwise work on the noise floor.
     f.append(f"afftdn=nf={a.noise}:nr={a.noise_reduction}:tn=1")
     if a.highpass:
         f.append(f"highpass=f={a.highpass}")
@@ -48,20 +43,17 @@ def build_clean(a, src=None):
         f.append("deesser=i=0.4:m=0.5:f=0.5")
     if a.compressor:
         f.append(f"acompressor=threshold={a.threshold}dB:ratio={a.ratio}:attack={a.attack}:release={a.release}")
-    if a.target_lufs:
-        # Two-pass loudnorm would be better, but single-pass gets most of the way and
-        # keeps this a one-liner. The measured result is printed for verification.
-        f.append(f"loudnorm=I={a.target_lufs}:TP={a.true_peak}:LRA=11")
-    if a.fade:
-        # The fade-out needs a start time. Without --duration there is no way to know
-        # where the file ends, and defaulting it to 0 would fade the entire file to
-        # silence — so probe the real length instead.
-        total = a.duration or probe_duration(src)
-        if total and total > a.fade:
-            f.append(f"afade=t=in:st=0:d={a.fade},afade=t=out:st={max(0, total - a.fade):.2f}:d={a.fade}")
-        else:
-            f.append(f"afade=t=in:st=0:d={a.fade}")
     return ",".join(f)
+
+
+def chain_fade_only(a, src):
+    """Just the fade stage, so the loudness measurement sees the final signal."""
+    if not a.fade:
+        return ""
+    total = a.duration or probe_duration(src)
+    if total and total > a.fade:
+        return f"afade=t=in:st=0:d={a.fade},afade=t=out:st={max(0, total - a.fade):.2f}:d={a.fade}"
+    return f"afade=t=in:st=0:d={a.fade}"
 
 
 def probe_duration(path):
@@ -77,15 +69,62 @@ def probe_duration(path):
         return None
 
 
+def measure_chain_loudness(src, chain, dur_args=None):
+    """Measure loudness of a file after applying a filter chain.
+
+    Used for the two-pass loudnorm inside `clean`, where the signal that reaches the
+    loudness stage has already been denoised, filtered and compressed.
+    """
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(src)] + (dur_args or [])
+    cmd += ["-af", f"{chain},loudnorm=I=-23:TP=-2:LRA=11:print_format=json",
+            "-f", "null", "/dev/null"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    txt = r.stderr
+    start = txt.rfind("{")
+    end = txt.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        data = json.loads(txt[start:end + 1])
+        return {
+            "i": float(data["input_i"]),
+            "lra": float(data["input_lra"]),
+            "tp": float(data["input_tp"]),
+            "thresh": float(data["input_thresh"]),
+            "offset": float(data.get("target_offset", 0)),
+        }
+    except (KeyError, ValueError):
+        return None
+
+
 def cmd_clean(a):
     need_ffmpeg()
     src, dst = Path(a.input), Path(a.output)
     if not src.exists():
         sys.exit(f"no such file: {src}")
-    filt = build_clean(a, src)
-    cmd = ["ffmpeg", "-hide_banner", "-y", "-i", str(src)]
-    if a.duration:
-        cmd += ["-t", str(a.duration)]
+
+    pre = chain_without_loudnorm(a, src)
+    fade = chain_fade_only(a, src)
+    dur_args = ["-t", str(a.duration)] if a.duration else []
+
+    if a.target_lufs:
+        # Pass one: measure the loudness of the signal as it arrives at the loudnorm
+        # stage, i.e. after denoise/EQ/de-esser/compression. Measuring the raw file
+        # would be wrong, because those filters change the level.
+        meas_chain = ",".join(x for x in (pre, fade) if x)
+        meas = measure_chain_loudness(src, meas_chain, dur_args)
+        if meas:
+            loud = (f"loudnorm=I={a.target_lufs}:TP={a.true_peak}:LRA=11"
+                    f":measured_I={meas['i']}:measured_LRA={meas['lra']}"
+                    f":measured_TP={meas['tp']}:measured_thresh={meas['thresh']}"
+                    f":offset={meas['offset']}:linear=true")
+        else:
+            loud = f"loudnorm=I={a.target_lufs}:TP={a.true_peak}:LRA=11"
+        filt = ",".join(x for x in (pre, loud, fade) if x)
+    else:
+        filt = ",".join(x for x in (pre, fade) if x)
+
+    cmd = ["ffmpeg", "-hide_banner", "-y", "-i", str(src)] + dur_args
     cmd += ["-af", filt, str(dst)]
     err = run(cmd)
     report(src, dst, err)
@@ -130,13 +169,57 @@ def cmd_mix(a):
     report(voice, dst, err)
 
 
+def measure_loudness(src):
+    """First pass: measure the loudness statistics of a file.
+
+    ffmpeg's loudnorm filter needs these values to normalise accurately. In single-pass
+    mode it estimates them, which can leave the result a decibel or two off target.
+    """
+    cmd = ["ffmpeg", "-hide_banner", "-nostats", "-i", str(src),
+           "-af", "loudnorm=I=-23:TP=-2:LRA=11:print_format=json", "-f", "null", "/dev/null"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    txt = r.stderr
+    start = txt.rfind("{")
+    end = txt.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return None
+    try:
+        data = json.loads(txt[start:end + 1])
+    except ValueError:
+        return None
+    try:
+        return {
+            "i": float(data["input_i"]),
+            "lra": float(data["input_lra"]),
+            "tp": float(data["input_tp"]),
+            "thresh": float(data["input_thresh"]),
+            "offset": float(data.get("target_offset", 0)),
+        }
+    except (KeyError, ValueError):
+        return None
+
+
 def cmd_loudnorm(a):
+    """Normalise to a target loudness using ffmpeg's two-pass loudnorm.
+
+    Pass one measures the file's integrated loudness, loudness range and true peak;
+    pass two applies the correction using those measurements, which lands much closer
+    to the requested target than the single-pass estimate.
+    """
     need_ffmpeg()
     src, dst = Path(a.input), Path(a.output)
     if not src.exists():
         sys.exit(f"no such file: {src}")
-    run(["ffmpeg", "-hide_banner", "-y", "-i", str(src),
-         "-af", f"loudnorm=I={a.target_lufs}:TP={a.true_peak}:LRA=11", str(dst)])
+    measured = measure_loudness(src)
+    if measured:
+        filt = (f"loudnorm=I={a.target_lufs}:TP={a.true_peak}:LRA=11"
+                f":measured_I={measured['i']}:measured_LRA={measured['lra']}"
+                f":measured_TP={measured['tp']}:measured_thresh={measured['thresh']}"
+                f":offset={measured['offset']}:linear=true:print_format=summary")
+    else:
+        # Fall back to single-pass rather than failing outright.
+        filt = f"loudnorm=I={a.target_lufs}:TP={a.true_peak}:LRA=11"
+    run(["ffmpeg", "-hide_banner", "-y", "-i", str(src), "-af", filt, str(dst)])
     report(src, dst, "")
 
 

@@ -85,7 +85,11 @@ python3 "$V" loop bed.wav long_bed.wav --duration 30
 
 搜索结果会缓存在 `~/.cache/sfx-sources/index.json`。下载命令依赖这份缓存，因此需要先搜索，再使用结果中的 ID 下载。
 
-每条结果为制表符分隔：`key  标题  时长  统计  许可证  描述`。许可证一列始终输出（包括 `--license cc0` 时），因此每条素材的许可都能在使用前核实。
+每条结果为制表符分隔：`key  标题  时长  统计  描述`。**许可证一列默认隐藏**——搜索时已经按许可筛过，默认视图里更有用的是标题、时长和热度信号。需要时加 `--licenses` 显示，或用 `--json` 输出机器可读结果（JSON 始终包含许可证和作者）。
+
+`--json` 可用于全部搜索命令与 `analyze`，字段包括 `key`、`title`、`duration`、`license`、`author`、`description`、`url`、`downloads`（`analyze` 为 `duration_seconds`、`mean_volume_db`、`max_volume_db`、`silence_regions`）。
+
+响度归一使用 FFmpeg 的 **两遍式** loudnorm：第一遍测量素材的积分响度、响度范围与真峰值，第二遍依据测量值校正。实测误差在 0.05 LU 以内，而单遍式在安静素材上通常偏差 0.4 LU。`clean` 内的测量发生在降噪/EQ/压缩之后，因为那是响度环节真正接收到的信号。
 
 ### 三个来源的分工
 

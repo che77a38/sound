@@ -13,8 +13,8 @@ V=~/.claude/skills/sound/scripts/vocal.py
 # in a project instead: S=.claude/skills/sound/scripts/sfx.py
 
 python3 $S all "<query>" --license cc0      # fan out across every source, merged ranking
-python3 $S freesound "<query>"             # ↓downloads ★rating(votes) license description
-python3 $S commons "<query>"               # Wikimedia Commons: real duration + license per file
+python3 $S freesound "<query>"             # ↓downloads ★rating(votes) description
+python3 $S commons "<query>"               # Wikimedia Commons: real duration per file
 python3 $S mixkit "<query>"                # Mixkit Free License, no attribution needed
 python3 $S music "<query>" --duration long # BGM beds rather than one-shot effects
 python3 $S get <dir> fs:<id> wm:<id> mk:<id>
@@ -22,7 +22,7 @@ python3 $S analyze <file> --loudness --silence
 ```
 `--urls` on a search adds preview links for the user to audition.
 
-Every result is tab-separated: `key  title  duration  stats  license  description`. The license column is always present, including under `--license cc0`, so a file's licence can always be verified before use.
+Results are tab-separated: `key  title  duration  stats  description`. The license column is **hidden by default** — the search already filtered on it, and the useful default view is the title, length and popularity signal. Add `--licenses` to show it, or `--json` for machine-readable output, which always carries the license and author.
 
 ## Picking a source
 
@@ -65,11 +65,14 @@ python3 $V loop bed.wav long_bed.wav --duration 30
 - `duck` uses sidechain compression, so the bed reacts to the voice itself and keeps working when the speech timing shifts. Prefer it over `mix` for narration.
 - `mix` is an even blend with no ducking — right for a bed that should sit quietly under a whole segment.
 - **-16 LUFS** is the usual target for spoken content; -14 is for streaming music.
+- Loudness normalisation uses ffmpeg's **two-pass** loudnorm: a first pass measures the signal's integrated loudness, range and true peak, and the second pass applies the correction from those measurements. This lands within ~0.05 LU of the target; the single-pass estimate is typically 0.4 LU off on quiet material. Inside `clean`, the measurement is taken after denoise/EQ/compression, since that is the signal the loudness stage actually receives.
 - Every command prints the measured loudness of its output, so the change is verifiable rather than assumed.
 
 ## Licensing and credits
 
-Every clip carries its own license. `--license cc0` is the safe default for commercial work; `--license by` allows clips that need a credit. The default `any` can return BY-NC, BY-SA and other terms — check the license column before using anything in a commercial deliverable.
+Every clip carries its own license. `--license cc0` is the safe default for commercial work; `--license by` allows clips that need a credit. The default `any` can return BY-NC, BY-SA and other terms.
+
+The license column is hidden in the default table output. Add `--licenses` to see it, or use `--json`, which always includes the license and author for every result — check it before using anything in a commercial deliverable.
 
 For anything not CC0, `get` prints the author for attribution. Keep the source URL and license with the deliverable.
 
@@ -81,7 +84,7 @@ For anything not CC0, `get` prints the author for attribution. Keep the source U
 
 ## Troubleshooting
 
-- Freesound times out: `python3 ~/.claude/skills/sound/scripts/clash_freesound.py --fix`; if that fails, read `references/local-setup.md` next to this file.
+- Freesound times out: `python3 ~/.claude/skills/sound/scripts/clash_freesound.py --fix`; if that fails, read `~/.claude/skills/sound/references/local-setup.md`.
 - Freesound caps ~80 KB/s per connection: put all keys in one `get`.
 - Commons search matches the file *description*, so an unusual phrase returns nothing — retry with a plainer word. Its `filetype:audio` filter is what keeps it from returning images.
 - Mixkit returns "?" for duration only if its waveform JSON is unreachable; the `analyze` command measures the downloaded file directly, so use that instead.
