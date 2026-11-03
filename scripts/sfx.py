@@ -50,6 +50,9 @@ def fetch(url, timeout=60, tries=3):
             time.sleep(1 + n)
 
 
+KEY_PREFIXES = ("fs", "wm", "mk")
+
+
 def load_index():
     try:
         return json.loads(INDEX.read_text())
@@ -61,20 +64,43 @@ def save_index(rows):
     CACHE.mkdir(parents=True, exist_ok=True)
     idx = load_index()
     idx.update({r["key"]: r for r in rows})
+    # Drop entries from sources this build no longer supports, so the cache cannot
+    # accumulate keys that `get` would only ever reject as unknown.
+    idx = {k: v for k, v in idx.items() if k.split(":", 1)[0] in KEY_PREFIXES}
     INDEX.write_text(json.dumps(idx, ensure_ascii=False))
 
 
+def clean_field(s, limit=None):
+    """Flatten a value so it cannot break the tab-separated output.
+
+    A title or description containing a tab or newline would silently shift every
+    later column, so tabs and line breaks become spaces.
+    """
+    s = re.sub(r"[\t\r\n]+", " ", str(s or "")).strip()
+    if limit:
+        s = s[:limit]
+    return s
+
+
 def show(rows, a, lic=False, hint=""):
+    """Print rows as tab-separated columns.
+
+    The license column is always emitted. Hiding it under `--license cc0` meant the
+    one case where you most need to prove a file is freely usable was also the one
+    case where the agent could not check it.
+    """
     save_index(rows)
     for r in rows:
-        print("\t".join([r["key"], r["title"], r["dur"]] + ([r["stats"]] if "stats" in r else []) + [r["license"]] * lic + ([r["desc"]] if r.get("desc") else []) + [r["preview"]] * a.urls))
+        print("\t".join([r["key"], clean_field(r["title"]), r["dur"]] + ([r["stats"]] if "stats" in r else [])
+                        + [clean_field(r.get("license", "?"))] + ([clean_field(r["desc"])] if r.get("desc") else [])
+                        + [r["preview"]] * a.urls))
     if not rows:
         print("(none)" + hint)
 
 
 def freesound(a):
     rows = freesound_rows(a)
-    show(rows[: a.n], a, lic=a.license != "cc0")
+    show(rows[: a.n], a)
 
 
 def freesound_rows(a):
@@ -107,7 +133,7 @@ def freesound_rows(a):
 
 def commons(a):
     rows = commons_rows(a)
-    show(rows[: a.n], a, lic=a.license != "cc0")
+    show(rows[: a.n], a)
 
 
 def commons_rows(a):
@@ -186,7 +212,7 @@ def lic_ok(lic, want):
 
 def mixkit(a):
     rows = mixkit_rows(a)
-    show(rows[: a.n], a, lic=a.license != "cc0")
+    show(rows[: a.n], a)
 
 
 def mixkit_rows(a):
@@ -261,7 +287,7 @@ def all_sources(a):
         for rows_src in per_source:
             if i < len(rows_src):
                 merged.append(rows_src[i])
-    show(merged[: a.n], a, lic=a.license != "cc0")
+    show(merged[: a.n], a)
 
 
 class _Sub:
@@ -290,7 +316,7 @@ def music(a):
             return secs >= 30
         return secs < 30
     rows = [r for r in rows if ok(r)]
-    show(rows[: a.n], a, lic=a.license != "cc0")
+    show(rows[: a.n], a)
 
 
 def get(a):

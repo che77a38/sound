@@ -22,6 +22,8 @@ python3 $S analyze <file> --loudness --silence
 ```
 `--urls` on a search adds preview links for the user to audition.
 
+Every result is tab-separated: `key  title  duration  stats  license  description`. The license column is always present, including under `--license cc0`, so a file's licence can always be verified before use.
+
 ## Picking a source
 
 - **Start with `all`** when you have no strong reason to pick one source. It queries all three concurrently and interleaves the results so no single source crowds out the others; a source that fails is skipped, not fatal.

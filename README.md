@@ -85,6 +85,8 @@ python3 "$V" loop bed.wav long_bed.wav --duration 30
 
 搜索结果会缓存在 `~/.cache/sfx-sources/index.json`。下载命令依赖这份缓存，因此需要先搜索，再使用结果中的 ID 下载。
 
+每条结果为制表符分隔：`key  标题  时长  统计  许可证  描述`。许可证一列始终输出（包括 `--license cc0` 时），因此每条素材的许可都能在使用前核实。
+
 ### 三个来源的分工
 
 | 来源 | 强项 | 局限 |

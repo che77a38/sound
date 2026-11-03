@@ -6,7 +6,7 @@ agent does not have to hand-assemble long ffmpeg expressions.
 
   vocal.py clean <in> <out> [--noise HZ] [--highpass HZ] [--lowpass HZ] [--deesser]
                           [--compressor] [--target LUFS] [--fade SEC]
-  vocal.py duck <voice> <bgm> <out> [--bgm-gain DB] [--duck-gain DB] [--fade SEC]
+  vocal.py duck <voice> <bgm> <out> [--bgm-gain DB] [--voice-gain DB] [--fade SEC]
   vocal.py mix  <bgm> <voice> <out> [--bgm-gain DB] [--voice-gain DB]
   vocal.py loudnorm <in> <out> [--target LUFS] [--tp DB]
   vocal.py trim  <in> <out> --start SEC --end SEC
@@ -31,7 +31,7 @@ def run(cmd):
     return r.stderr
 
 
-def build_clean(a):
+def build_clean(a, src=None):
     """A dialogue cleanup chain, ordered the way a mixer would.
 
     Filter order matters: denoise before EQ (so the EQ is not amplifying noise),
@@ -53,8 +53,28 @@ def build_clean(a):
         # keeps this a one-liner. The measured result is printed for verification.
         f.append(f"loudnorm=I={a.target_lufs}:TP={a.true_peak}:LRA=11")
     if a.fade:
-        f.append(f"afade=t=in:st=0:d={a.fade},afade=t=out:st={max(0, (a.duration or 0) - a.fade):.2f}:d={a.fade}")
+        # The fade-out needs a start time. Without --duration there is no way to know
+        # where the file ends, and defaulting it to 0 would fade the entire file to
+        # silence — so probe the real length instead.
+        total = a.duration or probe_duration(src)
+        if total and total > a.fade:
+            f.append(f"afade=t=in:st=0:d={a.fade},afade=t=out:st={max(0, total - a.fade):.2f}:d={a.fade}")
+        else:
+            f.append(f"afade=t=in:st=0:d={a.fade}")
     return ",".join(f)
+
+
+def probe_duration(path):
+    """Length of a media file in seconds, or None if it cannot be read."""
+    if not shutil.which("ffprobe"):
+        return None
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                            "-of", "default=nw=1:nk=1", str(path)],
+                           capture_output=True, text=True, timeout=60)
+        return float(r.stdout.strip())
+    except Exception:
+        return None
 
 
 def cmd_clean(a):
@@ -62,7 +82,7 @@ def cmd_clean(a):
     src, dst = Path(a.input), Path(a.output)
     if not src.exists():
         sys.exit(f"no such file: {src}")
-    filt = build_clean(a)
+    filt = build_clean(a, src)
     cmd = ["ffmpeg", "-hide_banner", "-y", "-i", str(src)]
     if a.duration:
         cmd += ["-t", str(a.duration)]
@@ -197,7 +217,6 @@ def main():
 
     d = sp.add_parser("duck", help="duck bed under voice"); d.add_argument("voice"); d.add_argument("bgm"); d.add_argument("output")
     d.add_argument("--bgm-gain", type=float, default=-12); d.add_argument("--voice-gain", type=float, default=0)
-    d.add_argument("--duck-gain", type=float, default=-12, help="unused; kept for readability")
     d.add_argument("--threshold", type=float, default=-30); d.add_argument("--ratio", type=float, default=8)
     d.add_argument("--fade", type=float, default=0); d.set_defaults(fn=cmd_duck)
 
